@@ -1,0 +1,49 @@
+# =============================================================================
+# .gitignore
+# =============================================================================
+
+# 환경 변수 (API Key 보호 - 절대 커밋 금지)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+
+# 학습 체크포인트 (용량 큼)
+checkpoints/
+checkpoint_*/
+*.pth
+
+# 데이터셋 (자동 다운로드됨)
+data/
+
+# 그래프 출력
+plots/
+
+# wandb 로컬 로그
+wandb/
+wandb_*/
+
+# 로그
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 수업자료
+*.pdf
+
+# 서버 마운트 파일
+mnt/
