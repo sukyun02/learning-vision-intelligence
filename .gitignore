@@ -18,7 +18,7 @@ venv/
 
 # 학습 체크포인트 (용량 큼)
 checkpoints/
-checkpoint_*/
+checkpoints_*/
 *.pth
 
 # 데이터셋 (자동 다운로드됨)

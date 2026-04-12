@@ -36,12 +36,22 @@ def run_seed(seed: int, extra_args: list):
 def main(args):
     import os, csv
     import numpy as np
+    from dotenv import dotenv_values
 
     seeds     = [42, 0, 1]
     top1_list = []
     super_list = []
 
+    # env 파일에서 CKPT_DIR 읽기
+    if args.env_file:
+        env_vals = dotenv_values(args.env_file)
+    else:
+        env_vals = dotenv_values(".env")
+    ckpt_dir = env_vals.get("CKPT_DIR", "./checkpoints")
+
     extra = []
+    if args.env_file:
+        extra += ["--env-file", args.env_file]
     if args.epochs:
         extra += ["--epochs", str(args.epochs)]
     if args.batch_size:
@@ -50,7 +60,7 @@ def main(args):
     for seed in seeds:
         run_seed(seed, extra)
 
-        log_path = os.path.join("checkpoints", f"log_seed{seed}.csv")
+        log_path = os.path.join(ckpt_dir, f"log_seed{seed}.csv")
         if not os.path.exists(log_path):
             print(f"[WARN] Log not found for seed {seed}")
             continue
@@ -76,6 +86,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--env-file",   type=str, default=None,
+                        help="Path to .env file (e.g. .env.sukyun)")
     parser.add_argument("--epochs",     type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     main(parser.parse_args())

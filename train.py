@@ -30,7 +30,17 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 import wandb
 
-load_dotenv()
+def _load_env():
+    """--env-file 인자가 있으면 해당 파일을, 없으면 기본 .env를 로드"""
+    import sys as _sys
+    env_file = ".env"
+    for i, arg in enumerate(_sys.argv):
+        if arg == "--env-file" and i + 1 < len(_sys.argv):
+            env_file = _sys.argv[i + 1]
+            break
+    load_dotenv(env_file, override=True)
+
+_load_env()
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -169,10 +179,21 @@ def main(args):
     # ---------------------------------------------------------------------------
     # wandb 초기화
     # ---------------------------------------------------------------------------
+    # wandb 로컬 로그 디렉토리: .env → ./wandb, .env.xxx → ./wandb_xxx
+    env_file = args.env_file
+    basename = os.path.basename(env_file)          # e.g. ".env.sukyun02"
+    if basename.startswith(".env.") and len(basename) > 5:
+        suffix = basename[5:]                      # e.g. "sukyun02"
+        wandb_dir = f"./wandb_{suffix}"
+    else:
+        wandb_dir = "./wandb"
+    os.makedirs(wandb_dir, exist_ok=True)
+
     run = wandb.init(
         entity  = os.getenv("WANDB_ENTITY"),
         project = os.getenv("WANDB_PROJECT", "pyramidnet-cifar100"),
         name    = f"pyramidnet272_seed{args.seed}",
+        dir     = wandb_dir,
         config  = {
             "model"        : "PyramidNet-272 α200 + ShakeDrop",
             "dataset"      : "CIFAR-100",
@@ -226,7 +247,7 @@ def main(args):
     # SWA
     swa_model   = AveragedModel(model)
     swa_start   = args.epochs - args.swa_epochs          # e.g. 1800 - 450 = 1350
-    swa_lr      = args.lr * 0.05
+    swa_lr      = args.lr * 0.1
     swa_scheduler = SWALR(optimizer, swa_lr=swa_lr,
                           anneal_epochs=10, anneal_strategy='cos')
 
@@ -341,6 +362,8 @@ def parse_args():
     parser.add_argument("--data_root",    type=str,   default=os.getenv("DATA_ROOT",        "./data"))
     parser.add_argument("--ckpt_dir",     type=str,   default=os.getenv("CKPT_DIR",         "./checkpoints"))
     parser.add_argument("--num_workers",  type=int,   default=8)
+    parser.add_argument("--env-file",     type=str,   default=".env",
+                        help="Path to .env file (e.g. .env.sukyun)")
     return parser.parse_args()
 
 if __name__ == "__main__":

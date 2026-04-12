@@ -1,8 +1,9 @@
 """
-Evaluation Script — TTA + Super-Class Accuracy
-- hflip + 4-corner crop × 5  (as per proposal)
-- Fine-logit correction: P(fine) × P(super|fine)
-- Loads SWA checkpoint
+Evaluation Script — CIFAR-100 Classification Challenge
+
+Metrics (per PDF specification):
+  1. Top-1 Accuracy
+  2. Super-Class Accuracy: Top-5 predictions 중 정답 super-class에 속하는 비율
 
 Usage:
     python evaluate.py --ckpt checkpoints/swa_final_seed42.pth
@@ -27,120 +28,47 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ---------------------------------------------------------------------------
-# TTA transforms
-# ---------------------------------------------------------------------------
-
-def tta_transforms():
-    """Returns a list of (transform_fn) for hflip + 4-corner + center crop."""
-    mean, std = CIFAR100_MEAN, CIFAR100_STD
-    normalize = T.Normalize(mean, std)
-
-    base = T.Compose([T.ToTensor(), normalize])
-
-    def hflip(pil):
-        return normalize(T.functional.hflip(T.ToTensor()(pil)))
-
-    def corner_crop(pil, i):
-        """i in 0-3 for four corners, 4 for center"""
-        crops = T.FiveCrop(28)(pil)    
-        t = T.Compose([T.Resize(32), T.ToTensor(), normalize])
-        return t(crops[i])
-
-    transforms = [base, lambda p: hflip(p)]
-    transforms += [lambda p, i=i: corner_crop(p, i) for i in range(5)]
-    return transforms    
-
-
-# ---------------------------------------------------------------------------
-# Logit correction: P(fine) × P(super|fine)
-# ---------------------------------------------------------------------------
-
-def super_class_correction(fine_logits: torch.Tensor) -> torch.Tensor:
-    """
-    Corrects fine logits by multiplying P(fine) with P(super | fine).
-    Here P(super | fine) is 1.0 for the super-class each fine class belongs to
-    and 0 otherwise — so this just scales by the super-class probability.
-    """
-    mapping = torch.tensor(FINE_TO_COARSE, device=fine_logits.device)
-    p_fine  = F.softmax(fine_logits, dim=-1)             
-
-    B = fine_logits.size(0)
-    p_super = torch.zeros(B, 20, device=fine_logits.device)
-    p_super.scatter_add_(1, mapping.unsqueeze(0).expand(B, -1), p_fine)
-
-    coarse_probs_expanded = p_super[:, mapping]           
-    corrected = p_fine * coarse_probs_expanded
-    return corrected
-
-
-# ---------------------------------------------------------------------------
 # Evaluate
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def evaluate_with_tta(model, dataset, batch_size=100, use_correction=True):
+def evaluate(model, dataset, batch_size=100):
     model.eval()
-    loader = DataLoader(dataset, batch_size=batch_size,
-                        shuffle=False, num_workers=4, pin_memory=True)
-    transforms = tta_transforms()
-
-    all_logits = []
-    for t in transforms:
-        dataset.transform = T.Compose([])   
-        tta_loader = DataLoader(dataset, batch_size=batch_size,
-                                shuffle=False, num_workers=0)
-        logits_list = []
-        for imgs, _ in tta_loader:
-            pass
-    dataset.transform = None
 
     val_transform = T.Compose([T.ToTensor(), T.Normalize(CIFAR100_MEAN, CIFAR100_STD)])
-    hflip_transform = T.Compose([
-        T.RandomHorizontalFlip(p=1.0),
-        T.ToTensor(),
-        T.Normalize(CIFAR100_MEAN, CIFAR100_STD),
-    ])
-
-    dataset_plain = torchvision.datasets.CIFAR100(
+    dataset_val = torchvision.datasets.CIFAR100(
         root=dataset.root, train=False, download=False, transform=val_transform)
-    dataset_hflip = torchvision.datasets.CIFAR100(
-        root=dataset.root, train=False, download=False, transform=hflip_transform)
+    loader = DataLoader(dataset_val, batch_size=batch_size,
+                        shuffle=False, num_workers=4, pin_memory=True)
 
-    loader_plain = DataLoader(dataset_plain, batch_size=batch_size,
-                              shuffle=False, num_workers=4, pin_memory=True)
-    loader_hflip = DataLoader(dataset_hflip, batch_size=batch_size,
-                              shuffle=False, num_workers=4, pin_memory=True)
-
-    logits_sum = None
+    all_logits = []
     all_labels = []
 
-    for (imgs, labels), (imgs_h, _) in zip(loader_plain, loader_hflip):
+    for imgs, labels in loader:
         imgs   = imgs.to(DEVICE)
-        imgs_h = imgs_h.to(DEVICE)
         labels = labels.to(DEVICE)
+        logits = model(imgs)
+        all_logits.append(logits)
+        all_labels.append(labels)
 
-        lg1 = model(imgs)
-        lg2 = model(imgs_h)
-        avg = (lg1 + lg2) / 2.0
+    all_logits = torch.cat(all_logits, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
 
-        if logits_sum is None:
-            logits_sum = avg
-            all_labels = labels
-        else:
-            logits_sum = torch.cat([logits_sum, avg], dim=0)
-            all_labels = torch.cat([all_labels, labels], dim=0)
+    probs = F.softmax(all_logits, dim=-1)
 
-    if use_correction:
-        probs = super_class_correction(logits_sum)
-    else:
-        probs = F.softmax(logits_sum, dim=-1)
-
+    # Top-1 Accuracy
     preds = probs.argmax(dim=1)
-    fine_acc  = (preds == all_labels).float().mean().item()
-    coarse_acc = (fine_to_coarse_tensor(preds.cpu()) ==
-                  fine_to_coarse_tensor(all_labels.cpu())).float().mean().item()
+    top1_acc = (preds == all_labels).float().mean().item()
 
-    return fine_acc, coarse_acc
+    # Super-Class Accuracy (PDF 규정):
+    # Top-5 예측 중 정답과 같은 super-class에 속하는 비율
+    mapping = torch.tensor(FINE_TO_COARSE, device=DEVICE)
+    _, top5_preds = probs.topk(5, dim=1)                    # (N, 5)
+    true_coarse = mapping[all_labels]                        # (N,)
+    top5_coarse = mapping[top5_preds]                        # (N, 5)
+    sc_acc = (top5_coarse == true_coarse.unsqueeze(1)).float().mean(dim=1).mean().item()
+
+    return top1_acc, sc_acc
 
 
 # ---------------------------------------------------------------------------
@@ -156,30 +84,32 @@ def main(args):
 
     model = pyramidnet272(num_classes=100).to(DEVICE)
 
-    ckpt = torch.load(args.ckpt, map_location=DEVICE)
-    if "swa_state" in ckpt:
+    ckpt = torch.load(args.ckpt, map_location=DEVICE, weights_only=True)
+    if isinstance(ckpt, dict) and "swa_state" in ckpt:
         state = ckpt["swa_state"]
-        new_state = {k.replace("module.", ""): v for k, v in state.items()}
-        model.load_state_dict(new_state, strict=False)
-    elif "model_state" in ckpt:
-        model.load_state_dict(ckpt["model_state"])
+    elif isinstance(ckpt, dict) and "model_state" in ckpt:
+        state = ckpt["model_state"]
     else:
-        model.load_state_dict(ckpt)
+        state = ckpt
+    # SWA AveragedModel wraps keys with "module." prefix — strip it
+    state = {k.replace("module.", ""): v for k, v in state.items()
+             if k != "n_averaged"}
+    model.load_state_dict(state, strict=False)
 
     print(f"Checkpoint loaded: {args.ckpt}")
 
-    fine_acc, coarse_acc = evaluate_with_tta(model, val_set,
-                                              use_correction=args.use_correction)
-    print(f"Top-1 Accuracy   : {fine_acc*100:.2f}%")
-    print(f"Super-Class Acc. : {coarse_acc*100:.2f}%")
+    top1_acc, sc_acc = evaluate(model, val_set)
+    total = top1_acc * 100 + sc_acc * 100
+
+    print(f"\nTop-1 Accuracy  : {top1_acc*100:.2f}%")
+    print(f"SC Density      : {sc_acc*100:.2f}%")
+    print(f"Total Score     : {total:.2f}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt",           type=str,            required=True)
-    parser.add_argument("--data_root",      type=str,            default="./data")
-    parser.add_argument("--use_correction", action="store_true", default=True,
-                        help="Apply super-class logit correction")
+    parser.add_argument("--ckpt",      type=str, required=True)
+    parser.add_argument("--data_root", type=str, default="./data")
     return parser.parse_args()
 
 
