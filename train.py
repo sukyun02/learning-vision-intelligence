@@ -189,6 +189,10 @@ def main(args):
         wandb_dir = "./wandb"
     os.makedirs(wandb_dir, exist_ok=True)
 
+    # SWA 시점 사전 계산 (wandb config에 기록하기 위해 init 앞에서 처리)
+    swa_start  = max(int(args.epochs * args.swa_start_ratio), 1)
+    swa_epochs = args.epochs - swa_start
+
     run = wandb.init(
         entity  = os.getenv("WANDB_ENTITY"),
         project = os.getenv("WANDB_PROJECT", "pyramidnet-cifar100"),
@@ -202,11 +206,12 @@ def main(args):
             "batch_size"   : args.batch_size,
             "lr"           : args.lr,
             "weight_decay" : args.weight_decay,
-            "swa_epochs"   : args.swa_epochs,
+            "swa_epochs"   : swa_epochs,
             "optimizer"    : "SGD + Nesterov",
             "scheduler"    : "CosineAnnealing + warmup 5ep",
             "augmentation" : "AutoAugment + Cutout + CutMix",
-            "loss"         : "HierarchicalLoss λ=0.8",
+            "loss"         : "HierarchicalLoss λ=0.4 + SC-LS ε=0.1",
+            "swa_start_ratio": args.swa_start_ratio,
         },
     )
 
@@ -226,8 +231,8 @@ def main(args):
 
     wandb.watch(model, log="all", log_freq=100)
 
-    # Loss
-    criterion = HierarchicalLoss(lam_coarse=0.8)
+    # Loss — SC-aware label smoothing + λ=0.4
+    criterion = HierarchicalLoss(lam_coarse=0.4, epsilon=0.1, intra_ratio=0.5)
 
     # Optimizer
     optimizer = optim.SGD(
@@ -244,9 +249,9 @@ def main(args):
     # AMP scaler
     scaler = torch.amp.GradScaler('cuda') if device.type == "cuda" else None
 
-    # SWA
+    # SWA — 마지막 swa_start_ratio 이후 구간만 평균 (기본: 마지막 15%)
+    # swa_start / swa_epochs 는 wandb.init 앞에서 이미 계산됨
     swa_model   = AveragedModel(model)
-    swa_start   = args.epochs - args.swa_epochs          # e.g. 1800 - 450 = 1350
     swa_lr      = args.lr * 0.1
     swa_scheduler = SWALR(optimizer, swa_lr=swa_lr,
                           anneal_epochs=10, anneal_strategy='cos')
@@ -359,6 +364,9 @@ def parse_args():
     parser.add_argument("--lr",           type=float, default=float(os.getenv("LR",         0.1)))
     parser.add_argument("--weight_decay", type=float, default=float(os.getenv("WEIGHT_DECAY", 5e-4)))
     parser.add_argument("--swa_epochs",   type=int,   default=int(os.getenv("SWA_EPOCHS",   450)))
+    parser.add_argument("--swa_start_ratio", type=float,
+                        default=float(os.getenv("SWA_START_RATIO", 0.85)),
+                        help="SWA 시작 비율. 0.85 = 전체 epoch의 마지막 15%%부터 SWA 적용")
     parser.add_argument("--data_root",    type=str,   default=os.getenv("DATA_ROOT",        "./data"))
     parser.add_argument("--ckpt_dir",     type=str,   default=os.getenv("CKPT_DIR",         "./checkpoints"))
     parser.add_argument("--num_workers",  type=int,   default=8)
