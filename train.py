@@ -142,27 +142,44 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None,
 
 @torch.no_grad()
 def evaluate(model, loader, device):
+    """
+    Top-1 Accuracy + Super-Class Density (규정 메트릭)
+    SC Density: Top-5 예측 fine class 중 정답 superclass에 속하는 비율의 평균
+    예) GT=Maple(Trees), Top-5=[Maple,Oak,Pine,Apple,Rose] → 3/5 = 0.6
+    """
     model.eval()
-    fine_correct = coarse_correct = total_n = 0
+    mapping = torch.tensor(fine_to_coarse_tensor(
+        torch.arange(100)).tolist(), dtype=torch.long, device=device)
+
+    fine_correct = 0
+    sc_density_sum = 0.0
+    total_n = 0
 
     pbar = tqdm(loader, ncols=100, leave=False, desc="  Eval ")
     for imgs, labels in pbar:
         imgs, labels = imgs.to(device), labels.to(device)
         logits = model(imgs)
-        preds  = logits.argmax(dim=1)
 
-        fine_correct   += (preds == labels).sum().item()
-        coarse_correct += (fine_to_coarse_tensor(preds) ==
-                           fine_to_coarse_tensor(labels)).sum().item()
-        total_n        += imgs.size(0)
+        # Top-1 accuracy
+        preds = logits.argmax(dim=1)
+        fine_correct += (preds == labels).sum().item()
+
+        # SC Density: Top-5 기반
+        _, top5 = logits.topk(5, dim=1)          # (B, 5)
+        top5_coarse  = mapping[top5]              # (B, 5)
+        gt_coarse    = mapping[labels]            # (B,)
+        matches = top5_coarse.eq(gt_coarse.unsqueeze(1))  # (B, 5)
+        sc_density_sum += matches.float().sum(dim=1).div(5).sum().item()
+
+        total_n += imgs.size(0)
 
         pbar.set_postfix({
-            "top1" : f"{fine_correct / total_n * 100:.1f}%",
-            "super": f"{coarse_correct / total_n * 100:.1f}%",
+            "top1"    : f"{fine_correct / total_n * 100:.1f}%",
+            "sc_dens" : f"{sc_density_sum / total_n * 100:.1f}%",
         })
 
     pbar.close()
-    return fine_correct / total_n, coarse_correct / total_n
+    return fine_correct / total_n, sc_density_sum / total_n
 
 
 # ---------------------------------------------------------------------------
@@ -209,9 +226,10 @@ def main(args):
             "swa_epochs"   : swa_epochs,
             "optimizer"    : "SGD + Nesterov",
             "scheduler"    : "CosineAnnealing + warmup 5ep",
-            "augmentation" : "AutoAugment + Cutout + CutMix",
-            "loss"         : "HierarchicalLoss λ=0.4 + SC-LS ε=0.1",
+            "augmentation" : f"AutoAugment + Cutout + CutMix(p={args.cutmix_prob})",
+            "loss"         : f"HierarchicalLoss λ={args.lam_coarse} ε={args.epsilon} intra={args.intra_ratio}",
             "swa_start_ratio": args.swa_start_ratio,
+            "swa_lr"       : args.swa_lr if args.swa_lr > 0 else args.lr * 0.1,
         },
     )
 
@@ -221,6 +239,7 @@ def main(args):
         batch_size  = args.batch_size,
         num_workers = args.num_workers,
         use_cutmix  = True,
+        cutmix_prob = args.cutmix_prob,
         seed        = args.seed,
     )
 
@@ -231,8 +250,12 @@ def main(args):
 
     wandb.watch(model, log="all", log_freq=100)
 
-    # Loss — SC-aware label smoothing + λ=0.4
-    criterion = HierarchicalLoss(lam_coarse=0.4, epsilon=0.1, intra_ratio=0.5)
+    # Loss — SC-aware label smoothing
+    criterion = HierarchicalLoss(
+        lam_coarse  = args.lam_coarse,
+        epsilon     = args.epsilon,
+        intra_ratio = args.intra_ratio,
+    )
 
     # Optimizer
     optimizer = optim.SGD(
@@ -252,7 +275,7 @@ def main(args):
     # SWA — 마지막 swa_start_ratio 이후 구간만 평균 (기본: 마지막 15%)
     # swa_start / swa_epochs 는 wandb.init 앞에서 이미 계산됨
     swa_model   = AveragedModel(model)
-    swa_lr      = args.lr * 0.1
+    swa_lr      = args.swa_lr if args.swa_lr > 0 else args.lr * 0.1
     swa_scheduler = SWALR(optimizer, swa_lr=swa_lr,
                           anneal_epochs=10, anneal_strategy='cos')
 
@@ -262,7 +285,7 @@ def main(args):
     log_path  = os.path.join(args.ckpt_dir, f"log_seed{args.seed}.csv")
 
     with open(log_path, "w") as f:
-        f.write("epoch,lr,train_loss,train_acc,val_top1,val_superclass\n")
+        f.write("epoch,lr,train_loss,train_acc,val_top1,val_sc_density\n")
 
     t0 = time.time()
 
@@ -314,7 +337,7 @@ def main(args):
 
             wandb.log({
                 "val/fineclass_acc" : val_top1  * 100,
-                "val/superclass_acc": val_super * 100,
+                "val/sc_density"    : val_super * 100,
             }, step=epoch)
 
         wandb.log({
@@ -342,7 +365,7 @@ def main(args):
     final_top1, final_super = evaluate(swa_model, val_loader, device)
     print(f"\n===== Final SWA Results (seed={args.seed}) =====")
     print(f"  Top-1 Accuracy   : {final_top1*100:.2f}%")
-    print(f"  Super-Class Acc. : {final_super*100:.2f}%")
+    print(f"  SC Density (Top-5): {final_super*100:.2f}%")
 
     torch.save(swa_model.state_dict(),
                os.path.join(args.ckpt_dir, f"swa_final_seed{args.seed}.pth"))
@@ -367,9 +390,14 @@ def parse_args():
     parser.add_argument("--swa_start_ratio", type=float,
                         default=float(os.getenv("SWA_START_RATIO", 0.85)),
                         help="SWA 시작 비율. 0.85 = 전체 epoch의 마지막 15%%부터 SWA 적용")
+    parser.add_argument("--swa_lr",        type=float, default=float(os.getenv("SWA_LR",        0.0)))
+    parser.add_argument("--lam_coarse",    type=float, default=float(os.getenv("LAM_COARSE",    0.4)))
+    parser.add_argument("--epsilon",       type=float, default=float(os.getenv("EPSILON",       0.1)))
+    parser.add_argument("--intra_ratio",   type=float, default=float(os.getenv("INTRA_RATIO",   0.5)))
+    parser.add_argument("--cutmix_prob",   type=float, default=float(os.getenv("CUTMIX_PROB",   0.5)))
     parser.add_argument("--data_root",    type=str,   default=os.getenv("DATA_ROOT",        "./data"))
     parser.add_argument("--ckpt_dir",     type=str,   default=os.getenv("CKPT_DIR",         "./checkpoints"))
-    parser.add_argument("--num_workers",  type=int,   default=8)
+    parser.add_argument("--num_workers",  type=int,   default=int(os.getenv("NUM_WORKERS", 8)))
     parser.add_argument("--env-file",     type=str,   default=".env",
                         help="Path to .env file (e.g. .env.sukyun)")
     return parser.parse_args()

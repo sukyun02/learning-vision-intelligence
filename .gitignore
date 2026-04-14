@@ -44,6 +44,7 @@ Thumbs.db
 
 # 수업자료
 *.pdf
+*.pptx
 
 # 서버 마운트 파일
 mnt/
