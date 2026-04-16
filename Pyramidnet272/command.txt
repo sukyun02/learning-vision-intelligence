@@ -10,26 +10,26 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # check GPU occupancy
 nvidia-smi
 
-# Phase 0: batch 256 smoke test with validation batch kept at 1x
-python train_server.py --seed 42 --epochs 1 --batch_size 256 --lr 0.2 --eval_interval 1 --val_batch_mult 1
+# --- benchmark results (1 epoch, bs=160 기준) ---
+# bs=128 basic      : train=197.8s  imgs/s=252.4  VRAM=15.24GiB
+# bs=160 basic      : train=193.3s  imgs/s=258.3  VRAM=18.96GiB
+# bs=160 +fast+cl   : train=213.4s  imgs/s=234.0  VRAM=19.13GiB  (cudnn tuning overhead)
+# bs=256            : OOM
+#
+# channels_last 격리 테스트 (5 epoch, fast_cudnn off):
+#   epoch 1~5 전부 ~217s/epoch (기본 193s 대비 24s 느림)
+#   -> F.pad shortcut의 NHWC<->NCHW 포맷 변환이 매 iter 반복
+#   -> channels_last는 PyramidNet-272에 부적합 확정
 
-# Diagnose whether OOM is from training or eval/final-SWA path
-python train_server.py --seed 42 --epochs 1 --batch_size 256 --lr 0.2 --skip_eval
+# single seed training (400 epoch, ~22h) background
+nohup python train_server.py --seed 42 --epochs 400 --batch_size 160 --lr 0.125 --num_workers 8 --eval_interval 20 --fast_cudnn > logs/seed42.log 2>&1 &
 
-# Phase 1: speed test with safe CUDA options
-python train_server.py --seed 42 --epochs 1 --batch_size 256 --lr 0.2 --eval_interval 1 --val_batch_mult 1 --fast_cudnn --channels_last
+# printing terminal log
+  python train_server.py --seed 42 --epochs 400 --batch_size 160 --lr 0.125 --num_workers 8 --eval_interval 20 --fast_cudnn 2>&1 | tee logs/seed42.log                                              
 
-# Fallback comparison if batch 256 still OOMs
-python train_server.py --seed 42 --epochs 1 --batch_size 128 --lr 0.1 --eval_interval 1 --val_batch_mult 1 --fast_cudnn --channels_last
-
-# Phase 2A: single seed training, batch 256 path
-nohup python train_server.py --seed 42 --epochs 1800 --batch_size 256 --lr 0.2 --num_workers 8 --eval_interval 20 --val_batch_mult 1 --fast_cudnn --channels_last > logs/seed42.log 2>&1 &
-
-# Phase 2B: fallback single seed training, batch 128 path
-nohup python train_server.py --seed 42 --epochs 1800 --batch_size 128 --lr 0.1 --num_workers 8 --eval_interval 20 --val_batch_mult 1 --fast_cudnn --channels_last > logs/seed42.log 2>&1 &
-
-# multi-seed training after final batch choice
-python run_seeds.py --epochs 1800 --batch_size 256 --lr 0.2 --num_workers 8 --eval_interval 20 --val_batch_mult 1 --fast_cudnn --channels_last
+# multi-seed training
+python run_seeds.py --epochs 400 --batch_size 160 --lr 0.125 \
+    --num_workers 8 --eval_interval 20 --fast_cudnn
 
 # monitor
 tail -f logs/seed42.log
