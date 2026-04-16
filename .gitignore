@@ -45,6 +45,8 @@ Thumbs.db
 # 수업자료
 *.pdf
 *.pptx
+*.zip
+Pyramidnet110/
 
 # 서버 마운트 파일
 mnt/
