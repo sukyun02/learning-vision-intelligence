@@ -50,3 +50,14 @@ Pyramidnet110/
 
 # 서버 마운트 파일
 mnt/
+
+# PyramidNet-272 서버 학습 패키지 소스는 유지
+!Pyramidnet272/
+!Pyramidnet272/data/
+!Pyramidnet272/data/*.py
+
+# PyramidNet-272 서버 생성물은 제외
+Pyramidnet272/data/cifar-100-python/
+Pyramidnet272/checkpoints/
+Pyramidnet272/logs/
+Pyramidnet272/venv/

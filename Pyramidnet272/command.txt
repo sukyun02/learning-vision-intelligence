@@ -1,0 +1,26 @@
+# setup
+bash setup_server.sh
+
+# activate project venv before training/evaluation
+. venv/bin/activate
+
+# 1-epoch timing by batch size
+python train_server.py --seed 42 --epochs 1 --batch_size 256 --lr 0.2 --eval_interval 1
+python train_server.py --seed 42 --epochs 1 --batch_size 512 --lr 0.4 --eval_interval 1
+
+# single seed training
+nohup python train_server.py --seed 42 --batch_size 256 --lr 0.2 > logs/seed42.log 2>&1 &
+
+# multi-seed training
+python run_seeds.py --batch_size 256 --lr 0.2
+
+# monitor
+tail -f logs/seed42.log
+
+# evaluate
+python evaluate.py --ckpt checkpoints/best_seed42.pth
+python evaluate.py --ckpt checkpoints/swa_final_seed42.pth
+
+# process management
+ps aux | grep train_server.py
+kill [PID]
