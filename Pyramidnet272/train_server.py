@@ -110,7 +110,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None,
         optimizer.zero_grad(set_to_none=True)
 
         if scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast("cuda"):
                 logits = model(imgs)
                 loss = criterion(logits, la, lb, lam)
             scaler.scale(loss).backward()
@@ -411,7 +411,7 @@ def main(args):
         nesterov=True,
     )
     scheduler = build_scheduler(optimizer, args.epochs, warmup_epochs=5)
-    scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
+    scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
 
     swa_model = AveragedModel(model)
     swa_scheduler = SWALR(
@@ -454,7 +454,7 @@ def main(args):
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
         epoch_t0 = time.time()
-        print(f"[phase] train epoch={epoch}", flush=True)
+        tqdm.write(f"[phase] train epoch={epoch}")
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device, scaler,
             epoch=epoch, total_epochs=args.epochs,
@@ -482,9 +482,9 @@ def main(args):
                 torch.cuda.empty_cache()
             eval_model = swa_model if is_swa else model
             if is_swa:
-                print(f"[phase] update_bn epoch={epoch}", flush=True)
+                tqdm.write(f"[phase] update_bn epoch={epoch}")
                 update_bn(train_loader, swa_model, device=device)
-            print(f"[phase] eval epoch={epoch}", flush=True)
+            tqdm.write(f"[phase] eval epoch={epoch}")
             val_top1, val_sc_density = evaluate(
                 eval_model, val_loader, device,
                 channels_last=args.channels_last,
@@ -522,8 +522,8 @@ def main(args):
                     "seed": args.seed,
                     "args": vars(args),
                 }, ckpt_path)
-                print(f"\n  Best saved: top1={val_top1 * 100:.2f}% "
-                      f"sc_density={val_sc_density * 100:.2f}% [{ckpt_path}]")
+                tqdm.write(f"  Best saved: top1={val_top1 * 100:.2f}% "
+                          f"sc_density={val_sc_density * 100:.2f}% [{ckpt_path}]")
 
         if args.plot_interval > 0 and epoch % args.plot_interval == 0:
             plot_training_curves(log_path, args.ckpt_dir, args.seed, swa_start)
@@ -543,13 +543,12 @@ def main(args):
             train_sec, epoch_sec, train_imgs_per_sec, imgs_per_sec,
             cuda_max_alloc_gib, cuda_max_reserved_gib,
         )
-        print(
+        tqdm.write(
             f"[epoch] {epoch}/{args.epochs} "
             f"time={epoch_sec:.1f}s train={train_sec:.1f}s "
             f"imgs/s={train_imgs_per_sec:.1f} "
             f"cuda_alloc={cuda_max_alloc_gib:.2f}GiB "
-            f"cuda_reserved={cuda_max_reserved_gib:.2f}GiB",
-            flush=True,
+            f"cuda_reserved={cuda_max_reserved_gib:.2f}GiB"
         )
 
         swa_flag = "SWA" if is_swa else "-"
