@@ -40,8 +40,14 @@ def build_train_cmd(seed, args):
     add_if_set(cmd, "--data_root", args.data_root)
     add_if_set(cmd, "--ckpt_dir", args.ckpt_dir)
     add_if_set(cmd, "--num_workers", args.num_workers)
+    add_if_set(cmd, "--val_batch_mult", args.val_batch_mult)
+    add_if_set(cmd, "--prefetch_factor", args.prefetch_factor)
     add_if_set(cmd, "--eval_interval", args.eval_interval)
     add_if_set(cmd, "--plot_interval", args.plot_interval)
+    if args.fast_cudnn:
+        cmd.append("--fast_cudnn")
+    if args.channels_last:
+        cmd.append("--channels_last")
     return cmd
 
 
@@ -133,8 +139,12 @@ def parse_args():
     parser.add_argument("--data_root", type=str, default=None)
     parser.add_argument("--ckpt_dir", type=str, default="./checkpoints")
     parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--val_batch_mult", type=int, default=None)
+    parser.add_argument("--prefetch_factor", type=int, default=None)
     parser.add_argument("--eval_interval", type=int, default=None)
     parser.add_argument("--plot_interval", type=int, default=None)
+    parser.add_argument("--fast_cudnn", action="store_true", default=False)
+    parser.add_argument("--channels_last", action="store_true", default=False)
     return parser.parse_args()
 
 

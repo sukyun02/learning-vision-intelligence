@@ -149,7 +149,7 @@ def get_val_transform():
 
 def get_dataloaders(data_root="./data", batch_size=128, num_workers=4,
                     use_cutmix=True, cutmix_alpha=1.0, cutmix_prob=0.5,
-                    seed=42):
+                    seed=42, val_batch_multiplier=1, prefetch_factor=2):
     torch.manual_seed(seed)
 
     train_set = torchvision.datasets.CIFAR100(
@@ -179,8 +179,9 @@ def get_dataloaders(data_root="./data", batch_size=128, num_workers=4,
     if num_workers > 0:
         base_loader_kwargs.update({
             "persistent_workers": True,
-            "prefetch_factor": 2,
         })
+        if prefetch_factor is not None and prefetch_factor > 0:
+            base_loader_kwargs["prefetch_factor"] = prefetch_factor
 
     train_loader = DataLoader(
         train_set, batch_size=batch_size, shuffle=True,
@@ -190,7 +191,7 @@ def get_dataloaders(data_root="./data", batch_size=128, num_workers=4,
         **base_loader_kwargs,
     )
     val_loader = DataLoader(
-        val_set, batch_size=batch_size * 2, shuffle=False,
+        val_set, batch_size=batch_size * val_batch_multiplier, shuffle=False,
         **base_loader_kwargs,
     )
     return train_loader, val_loader

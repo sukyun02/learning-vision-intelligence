@@ -33,13 +33,13 @@ from losses.hierarchical_loss import HierarchicalLoss
 from models.pyramidnet import pyramidnet272
 
 
-def set_seed(seed: int):
+def set_seed(seed: int, fast_cudnn: bool = False):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = not fast_cudnn
+    torch.backends.cudnn.benchmark = fast_cudnn
 
 
 def build_scheduler(optimizer, epochs, warmup_epochs=5, eta_min=1e-4):
@@ -73,8 +73,18 @@ def state_dict_to_cpu(state_dict):
     }
 
 
+def move_images(imgs, device, channels_last=False):
+    if channels_last:
+        return imgs.to(
+            device,
+            memory_format=torch.channels_last,
+            non_blocking=True,
+        )
+    return imgs.to(device, non_blocking=True)
+
+
 def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None,
-                    epoch=0, total_epochs=0):
+                    epoch=0, total_epochs=0, channels_last=False):
     model.train()
     total_loss = 0.0
     total_correct = 0
@@ -86,18 +96,18 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None,
     for batch in pbar:
         if len(batch) == 4:
             imgs, la, lb, lam = batch
-            imgs = imgs.to(device)
-            la = la.to(device)
-            lb = lb.to(device)
-            lam = lam.to(device)
+            imgs = move_images(imgs, device, channels_last)
+            la = la.to(device, non_blocking=True)
+            lb = lb.to(device, non_blocking=True)
+            lam = lam.to(device, non_blocking=True)
         else:
             imgs, la = batch
-            imgs = imgs.to(device)
-            la = la.to(device)
+            imgs = move_images(imgs, device, channels_last)
+            la = la.to(device, non_blocking=True)
             lb = la
             lam = torch.ones(1, device=device)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         if scaler is not None:
             with torch.cuda.amp.autocast():
@@ -126,11 +136,12 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None,
         })
 
     pbar.close()
+    optimizer.zero_grad(set_to_none=True)
     return total_loss / total_n, total_correct / total_n
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, channels_last=False):
     model.eval()
     mapping = torch.tensor(
         fine_to_coarse_tensor(torch.arange(100)).tolist(),
@@ -144,8 +155,8 @@ def evaluate(model, loader, device):
 
     pbar = tqdm(loader, ncols=100, leave=False, desc="  Eval ")
     for imgs, labels in pbar:
-        imgs = imgs.to(device)
-        labels = labels.to(device)
+        imgs = move_images(imgs, device, channels_last)
+        labels = labels.to(device, non_blocking=True)
         logits = model(imgs)
 
         preds = logits.argmax(dim=1)
@@ -168,7 +179,9 @@ def evaluate(model, loader, device):
 
 
 def append_log(log_path, epoch, lr, train_loss, train_acc,
-               val_top1, val_sc_density, is_swa):
+               val_top1, val_sc_density, is_swa,
+               epoch_sec, imgs_per_sec, cuda_max_alloc_gib,
+               cuda_max_reserved_gib):
     with open(log_path, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -179,6 +192,30 @@ def append_log(log_path, epoch, lr, train_loss, train_acc,
             f"{val_top1:.6f}",
             f"{val_sc_density:.6f}",
             int(is_swa),
+            f"{epoch_sec:.2f}",
+            f"{imgs_per_sec:.2f}",
+            f"{cuda_max_alloc_gib:.3f}",
+            f"{cuda_max_reserved_gib:.3f}",
+        ])
+
+
+def append_perf_log(perf_path, epoch, lr, is_swa, did_eval,
+                    train_sec, epoch_sec, train_imgs_per_sec,
+                    epoch_imgs_per_sec, cuda_max_alloc_gib,
+                    cuda_max_reserved_gib):
+    with open(perf_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            epoch,
+            f"{lr:.8f}",
+            int(is_swa),
+            int(did_eval),
+            f"{train_sec:.2f}",
+            f"{epoch_sec:.2f}",
+            f"{train_imgs_per_sec:.2f}",
+            f"{epoch_imgs_per_sec:.2f}",
+            f"{cuda_max_alloc_gib:.3f}",
+            f"{cuda_max_reserved_gib:.3f}",
         ])
 
 
@@ -200,6 +237,10 @@ def load_log_rows(log_path):
                 "val_top1": float(row["val_top1"]) * 100,
                 "val_sc_density": float(row["val_sc_density"]) * 100,
                 "is_swa": int(row["is_swa"]),
+                "epoch_sec": float(row.get("epoch_sec", 0.0)),
+                "imgs_per_sec": float(row.get("imgs_per_sec", 0.0)),
+                "cuda_max_alloc_gib": float(row.get("cuda_max_alloc_gib", 0.0)),
+                "cuda_max_reserved_gib": float(row.get("cuda_max_reserved_gib", 0.0)),
             })
     return rows
 
@@ -297,6 +338,10 @@ def save_summary(summary_path, args, best_top1, best_sc_density,
         f.write(f"epsilon: {args.epsilon}\n")
         f.write(f"intra_ratio: {args.intra_ratio}\n")
         f.write(f"cutmix_prob: {args.cutmix_prob}\n")
+        f.write(f"val_batch_mult: {args.val_batch_mult}\n")
+        f.write(f"prefetch_factor: {args.prefetch_factor}\n")
+        f.write(f"fast_cudnn: {args.fast_cudnn}\n")
+        f.write(f"channels_last: {args.channels_last}\n")
         f.write(f"swa_start_ratio: {args.swa_start_ratio}\n")
         f.write(f"swa_start_epoch: {swa_start}\n")
         f.write(f"swa_lr: {args.swa_lr if args.swa_lr > 0 else args.lr * 0.1}\n")
@@ -308,8 +353,11 @@ def save_summary(summary_path, args, best_top1, best_sc_density,
 
 
 def main(args):
-    set_seed(args.seed)
+    set_seed(args.seed, args.fast_cudnn)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     os.makedirs(args.ckpt_dir, exist_ok=True)
 
     swa_start = max(int(args.epochs * args.swa_start_ratio), 1)
@@ -324,6 +372,10 @@ def main(args):
     print(f"  LR           : {args.lr}")
     print(f"  SWA start    : epoch {swa_start} (ratio={args.swa_start_ratio})")
     print(f"  SWA LR       : {swa_lr}")
+    print(f"  Val batch x  : {args.val_batch_mult}")
+    print(f"  fast_cudnn   : {args.fast_cudnn}")
+    print(f"  channels_last: {args.channels_last}")
+    print(f"  skip_eval    : {args.skip_eval}")
     print(f"  Checkpoints  : {args.ckpt_dir}")
     print(f"{'=' * 64}\n")
 
@@ -335,9 +387,13 @@ def main(args):
         cutmix_alpha=args.cutmix_alpha,
         cutmix_prob=args.cutmix_prob,
         seed=args.seed,
+        val_batch_multiplier=args.val_batch_mult,
+        prefetch_factor=args.prefetch_factor,
     )
 
     model = pyramidnet272(num_classes=100).to(device)
+    if args.channels_last:
+        model = model.to(memory_format=torch.channels_last)
     param_count = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Parameters: {param_count:.2f} M")
 
@@ -376,6 +432,18 @@ def main(args):
         writer.writerow([
             "epoch", "lr", "train_loss", "train_acc",
             "val_top1", "val_sc_density", "is_swa",
+            "epoch_sec", "imgs_per_sec",
+            "cuda_max_alloc_gib", "cuda_max_reserved_gib",
+        ])
+
+    perf_path = os.path.join(args.ckpt_dir, f"perf_seed{args.seed}.csv")
+    with open(perf_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "epoch", "lr", "is_swa", "did_eval",
+            "train_sec", "epoch_sec",
+            "train_imgs_per_sec", "epoch_imgs_per_sec",
+            "cuda_max_alloc_gib", "cuda_max_reserved_gib",
         ])
 
     t0 = time.time()
@@ -383,9 +451,14 @@ def main(args):
                      desc=f"Seed {args.seed}")
 
     for epoch in epoch_bar:
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        epoch_t0 = time.time()
+        print(f"[phase] train epoch={epoch}", flush=True)
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device, scaler,
             epoch=epoch, total_epochs=args.epochs,
+            channels_last=args.channels_last,
         )
 
         is_swa = epoch >= swa_start
@@ -399,15 +472,36 @@ def main(args):
         elapsed_h = (time.time() - t0) / 3600
         eta_h = elapsed_h / epoch * (args.epochs - epoch) if epoch > 0 else 0
 
-        should_eval = epoch % args.eval_interval == 0 or epoch == args.epochs
+        should_eval = (
+            not args.skip_eval
+            and (epoch % args.eval_interval == 0 or epoch == args.epochs)
+        )
+        train_sec = time.time() - epoch_t0
         if should_eval:
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
             eval_model = swa_model if is_swa else model
             if is_swa:
+                print(f"[phase] update_bn epoch={epoch}", flush=True)
                 update_bn(train_loader, swa_model, device=device)
-            val_top1, val_sc_density = evaluate(eval_model, val_loader, device)
+            print(f"[phase] eval epoch={epoch}", flush=True)
+            val_top1, val_sc_density = evaluate(
+                eval_model, val_loader, device,
+                channels_last=args.channels_last,
+            )
+            if device.type == "cuda":
+                cuda_max_alloc_gib = torch.cuda.max_memory_allocated() / 1024**3
+                cuda_max_reserved_gib = torch.cuda.max_memory_reserved() / 1024**3
+            else:
+                cuda_max_alloc_gib = 0.0
+                cuda_max_reserved_gib = 0.0
+            epoch_sec = time.time() - epoch_t0
+            imgs_per_sec = len(train_loader.dataset) / epoch_sec if epoch_sec > 0 else 0.0
             append_log(
                 log_path, epoch, cur_lr, train_loss, train_acc,
                 val_top1, val_sc_density, is_swa,
+                epoch_sec, imgs_per_sec, cuda_max_alloc_gib,
+                cuda_max_reserved_gib,
             )
 
             if val_top1 > best_top1:
@@ -434,6 +528,30 @@ def main(args):
         if args.plot_interval > 0 and epoch % args.plot_interval == 0:
             plot_training_curves(log_path, args.ckpt_dir, args.seed, swa_start)
 
+        if device.type == "cuda":
+            cuda_max_alloc_gib = torch.cuda.max_memory_allocated() / 1024**3
+            cuda_max_reserved_gib = torch.cuda.max_memory_reserved() / 1024**3
+        else:
+            cuda_max_alloc_gib = 0.0
+            cuda_max_reserved_gib = 0.0
+        epoch_sec = time.time() - epoch_t0
+        train_images = len(train_loader) * args.batch_size
+        train_imgs_per_sec = train_images / train_sec if train_sec > 0 else 0.0
+        imgs_per_sec = len(train_loader.dataset) / epoch_sec if epoch_sec > 0 else 0.0
+        append_perf_log(
+            perf_path, epoch, cur_lr, is_swa, should_eval,
+            train_sec, epoch_sec, train_imgs_per_sec, imgs_per_sec,
+            cuda_max_alloc_gib, cuda_max_reserved_gib,
+        )
+        print(
+            f"[epoch] {epoch}/{args.epochs} "
+            f"time={epoch_sec:.1f}s train={train_sec:.1f}s "
+            f"imgs/s={train_imgs_per_sec:.1f} "
+            f"cuda_alloc={cuda_max_alloc_gib:.2f}GiB "
+            f"cuda_reserved={cuda_max_reserved_gib:.2f}GiB",
+            flush=True,
+        )
+
         swa_flag = "SWA" if is_swa else "-"
         epoch_bar.set_postfix({
             "loss": f"{train_loss:.4f}",
@@ -447,8 +565,23 @@ def main(args):
 
     epoch_bar.close()
 
+    if args.skip_eval:
+        print("[skip_eval] Skipping final SWA BN update/evaluation/checkpoint.")
+        print("[skip_eval] No metric-based checkpoint or summary was written.")
+        plot_training_curves(log_path, args.ckpt_dir, args.seed, swa_start)
+        return
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    print("[phase] final_swa_update_bn", flush=True)
     update_bn(train_loader, swa_model, device=device)
-    final_top1, final_sc_density = evaluate(swa_model, val_loader, device)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    print("[phase] final_swa_eval", flush=True)
+    final_top1, final_sc_density = evaluate(
+        swa_model, val_loader, device,
+        channels_last=args.channels_last,
+    )
     elapsed_h = (time.time() - t0) / 3600
 
     print(f"\n{'=' * 64}")
@@ -489,8 +622,13 @@ def parse_args():
     parser.add_argument("--data_root", type=str, default="./data")
     parser.add_argument("--ckpt_dir", type=str, default="./checkpoints")
     parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--val_batch_mult", type=int, default=1)
+    parser.add_argument("--prefetch_factor", type=int, default=2)
     parser.add_argument("--eval_interval", type=int, default=20)
     parser.add_argument("--plot_interval", type=int, default=100)
+    parser.add_argument("--fast_cudnn", action="store_true", default=False)
+    parser.add_argument("--channels_last", action="store_true", default=False)
+    parser.add_argument("--skip_eval", action="store_true", default=False)
     return parser.parse_args()
 
 
